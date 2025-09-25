@@ -1,0 +1,62 @@
+# Builds our docker bake file
+inputs:
+  push-to-dockerhub:
+    description: "Whether to push to Dockerhub as well as ECR"
+    required: false
+    default: false
+  git-sha:
+    description: "The git sha to use as the image tag prefix"
+    required: false
+    default: ${{ github.sha }}
+  target:
+    description: "Target"
+    required: false
+    default: ""
+  platforms:
+    description: "Platforms"
+    required: false
+    default: "linux/amd64,linux/arm64"
+  push-cache:
+    description: "Should cache be pushed to registry"
+    required: false
+    default: true
+  cache-only:
+    description: "Only push cache, don't export images"
+    required: false
+    default: false
+
+runs:
+  using: 'composite'
+  steps:
+    # Get clean environment variables via https://github.com/marketplace/actions/github-environment-variables-action
+    - uses: FranzDiebold/github-env-vars-action@v2
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver: remote
+        endpoint: tcp://remote-buildkit-agent.infrastructure.svc.cluster.local:80
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v2
+    - name: Build and push
+      shell: bash
+      run: |
+        # Get a githash or tag name to use as image prefix
+        TAG_NAME=${{ github.event.release.tag_name }}
+        GIT_SHA=${{ inputs.git-sha }}
+        IMAGE_PREFIX=${TAG_NAME:-$GIT_SHA}
+        # Get the PR head branch for PR updates, the main branch for pushes to main and releases
+        TARGET_BRANCH=${{ 
+            (github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref)
+            || (github.event_name == 'pull_request_target' && github.event.pull_request.head.ref)
+            || (github.event_name == 'release' && github.event.release.target_commitish)
+            || 'unknown' 
+        }}
+
+        # Configure our buildkit builders
+        # docker buildx create --name remote-buildkit-agent --driver=remote --use tcp://remote-buildkit-agent.infrastructure.svc.cluster.local:80 || true # Create the builder (might already exist)
+
+        # Print what bake is going to do
+        VERSION=$IMAGE_PREFIX BRANCH=$TARGET_BRANCH PLATFORMS=${{ inputs.platforms }} PUSH_TO_DOCKERHUB=${{ inputs.push-to-dockerhub }} PUSH_CACHE=${{ inputs.push-cache }} CACHE_ONLY=${{ inputs.cache-only }} docker buildx bake -f docker/docker-bake.hcl --print ${{ inputs.target }}
+
+        # Build amd64 and arm64 images and push to repos
+        VERSION=$IMAGE_PREFIX BRANCH=$TARGET_BRANCH PLATFORMS=${{ inputs.platforms }} PUSH_TO_DOCKERHUB=${{ inputs.push-to-dockerhub }} PUSH_CACHE=${{ inputs.push-cache }} CACHE_ONLY=${{ inputs.cache-only }} docker buildx bake --progress plain --push -f docker/docker-bake.hcl ${{ inputs.target }}
